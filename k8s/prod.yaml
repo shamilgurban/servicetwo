@@ -1,0 +1,111 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: servicetwo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: servicetwo-app
+  template:
+    metadata:
+      annotations:
+        forceRestartVersion: "2"
+      labels:
+        app: servicetwo-app
+    spec:
+      containers:
+        - name: servicetwo
+          image: shamilgurban/servicetwo:1.0.0
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SERVER_PORT
+              value: "8080"
+
+  strategy:
+    canary:
+      stableService: servicetwo-stable
+      canaryService: servicetwo-canary
+      trafficRouting:
+        nginx:
+          stableIngress: servicetwo
+      steps:
+        - setWeight: 30
+        - analysis:
+            templates:
+              - templateName: servicetwo-mimir-inflight
+        # - pause: { duration: 3m }
+        # - setWeight: 50
+        - pause: { duration: 3m }
+        - setWeight: 100
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: servicetwo-mimir-inflight
+spec:
+  metrics:
+    - name: kubelet-inflight-requests
+      interval: 10s
+      count: 3
+      successCondition: result[0] > 15
+      failureCondition: result[0] <= 15
+      provider:
+        prometheus:
+          address: http://mimir-lab-query-frontend.mimir:8080/prometheus/
+          insecure: true
+          headers:
+            - key: X-Scope-OrgID
+              value: all-lab
+          query: |
+            sum(remote_vault_auth_total)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: servicetwo-stable
+spec:
+  ports:
+    - port: 80
+      targetPort: 8080
+  selector:
+    app: servicetwo-app
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: servicetwo-canary
+spec:
+  ports:
+    - port: 80
+      targetPort: 8080
+  selector:
+    app: servicetwo-app
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: servicetwo
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/affinity: cookie
+    nginx.ingress.kubernetes.io/session-cookie-max-age: "900"
+    nginx.ingress.kubernetes.io/session-cookie-expires: "900"
+spec:
+  tls:
+    - hosts:
+        - canary-stable.kapitalbank.az
+      secretName: servicetwo-tls
+  rules:
+    - host: canary-stable.kapitalbank.az
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: servicetwo-stable
+                port:
+                  number: 80
